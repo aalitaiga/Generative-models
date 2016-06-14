@@ -42,7 +42,7 @@ x_reconstruct = decoder_mean(h_decod)
 
 def vae_loss(x_, x_reconstruct):
     rec_loss = binary_crossentropy(x_, x_reconstruct)
-    kl_loss = - 0.5 * K.mean(1 + K.log(K.square(z_std) + 1e-10) - K.square(z_mean) - K.square(z_std), axis=-1)
+    kl_loss = - 0.5 * K.mean(1 + 2*K.log(z_std + 1e-10) - K.square(z_mean) - K.square(z_std), axis=-1)
     return rec_loss + kl_loss
 
 vae = Model(x, x_reconstruct)
@@ -69,7 +69,7 @@ vae.fit(
 )
 
 vae.save_weights('vae_weights.h5')
-'Training finished model saved'
+print 'Training finished model saved'
 
 # build a model to project inputs on the latent space
 encoder = Model(x, z_mean)
