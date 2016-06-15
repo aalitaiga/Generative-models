@@ -1,10 +1,12 @@
 """Impleting PixelCNN in keras"""
+from __future__ import division
 
 from keras.callbacks import EarlyStopping
 from keras.datasets import mnist
 from keras.models import Model
 from keras.layers import Input, Convolution2D
-from keras.layers.core import Activation, Reshape
+from keras.layers.core import Activation, Reshape, Permute
+from keras.utils.np_utils import to_categorical
 from keras import backend as K
 
 import theano
@@ -12,13 +14,14 @@ from theano import tensor as T
 
 import numpy as np
 
-batch_size = 100
+batch_size = 16
 mnist_dim = 28
-nb_epoch = 100
+nb_epoch = 40
 n_channel = 1
-patience = 4
+patience = 3
 
-MODE = 'binary'  # choice with 'binary' and '256ary'
+MODE = '256ary'  # choice with 'binary' and '256ary
+
 if MODE == 'binary':
     activation = 'sigmoid'
     loss = 'binary_crossentropy'
@@ -87,11 +90,15 @@ def create_network():
         x_ = Convolution2DNoFlip(*second_layer, activation='relu', border_mode='same', mask='B')(x_)
 
     # 2 layers of Relu followed by 1x1 conv
-    x_ = Convolution2DNoFlip(32, 1, 1, activation='relu', border_mode='same', mask='B')(x_)
-    x_ = Convolution2DNoFlip(32, 1, 1, activation='relu', border_mode='same', mask='B')(x_)
+    x_ = Convolution2DNoFlip(64, 1, 1, activation='relu', border_mode='same', mask='B')(x_)
+    x_ = Convolution2DNoFlip(128, 1, 1, activation='relu', border_mode='same', mask='B')(x_)
 
     # Depending on the output
     x_ = Convolution2DNoFlip(*third_layer,border_mode='same', mask='B')(x_)
+
+    if MODE == '256ary':
+        x_ = Reshape((256, mnist_dim**2))(x_)
+        x_ = Permute((2,1))(x_)
 
     y = Activation(activation)(x_)
 
@@ -100,20 +107,31 @@ def create_network():
     print "Model compiled"
     return model
 
+def cost(pred, truth):
+    pred = pred.reshape((batch_size*784,256)).dimshuffle(1,0)
+    truth = T.cast(truth.flatten(), 'int64')
+    return T.nnet.categorical_crossentropy(pred, truth).mean()
+
+def generate_samples(model):
+    pass
+
 if __name__ == '__main__':
 
     PixelCNN = create_network()
-    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+    (x_train, _), (x_test, _) = mnist.load_data()
 
-    x_train = x_train.astype('float32') / 255.
-    x_test = x_test.astype('float32') / 255.
-    x_train = x_train.reshape((len(x_train), 1, 28, 28))
-    x_test = x_test.reshape((len(x_test), 1, 28, 28))
+    y_train = x_train.reshape((len(x_train), 784,1)).astype('int32')
+    # Dirty fix, fool keras with nans
+
+    x_train = x_train.astype('float32') / 255
+    x_test = x_test.astype('float32') / 255
+    x_train = x_train.reshape((len(x_train), n_channel, mnist_dim, mnist_dim))
+    x_test = x_test.reshape((len(x_test), n_channel, mnist_dim, mnist_dim))
 
     print "Starting training"
     PixelCNN.fit(
         x_train,
-        x_train,
+        y_train,
         nb_epoch=nb_epoch,
         batch_size=batch_size,
         validation_data=(x_test, x_test),
