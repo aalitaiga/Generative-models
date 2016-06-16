@@ -4,9 +4,8 @@ from __future__ import division
 from keras.callbacks import EarlyStopping
 from keras.datasets import mnist
 from keras.models import Model
-from keras.layers import Input, Convolution2D
+from keras.layers import Input, Convolution2D, merge
 from keras.layers.core import Activation, Reshape, Permute
-from keras.utils.np_utils import to_categorical
 from keras import backend as K
 
 import theano
@@ -28,7 +27,8 @@ if MODE == 'binary':
 elif MODE == '256ary':
     activation = 'softmax'
     loss = 'categorical_crossentropy'
-n_layer = 5
+n_layer = 6
+res_connections = True
 first_layer = (32, 7, 7)
 second_layer = (32, 3, 3)
 third_layer = (256 if MODE == '256ary' else 1, 1, 1)
@@ -86,8 +86,14 @@ def create_network():
     x_ = Convolution2DNoFlip(*first_layer, input_shape=(1, 28, 28), border_mode='same', mask='A')(x)
 
     # Second type of layers using mask B
-    for i in range(n_layer):
-        x_ = Convolution2DNoFlip(*second_layer, activation='relu', border_mode='same', mask='B')(x_)
+    for i in range(n_layer // 2):
+        x_1 = Convolution2DNoFlip(*second_layer, activation='relu', border_mode='same', mask='B')(x_)
+        x_2 = Convolution2DNoFlip(*second_layer, activation='relu', border_mode='same', mask='B')(x_1)
+
+        if res_connections:
+            x_ = merge([x_, x_2], mode='sum')
+        else:
+            x_ = x_2
 
     # 2 layers of Relu followed by 1x1 conv
     x_ = Convolution2DNoFlip(64, 1, 1, activation='relu', border_mode='same', mask='B')(x_)
@@ -103,13 +109,14 @@ def create_network():
     y = Activation(activation)(x_)
 
     model = Model(x, y)
-    model.compile(optimizer='adagrad', loss=loss)
+    model.compile(optimizer='adagrad', loss=cost)
     print "Model compiled"
     return model
 
 def cost(pred, truth):
-    pred = pred.reshape((batch_size*784,256)).dimshuffle(1,0)
-    truth = T.cast(truth.flatten(), 'int64')
+    pred = pred.reshape((batch_size*784,256))
+    truth = T.cast(truth[:,:,0], 'int64').flatten()
+    #truth = T.cast(truth.flatten(), 'int64')
     return T.nnet.categorical_crossentropy(pred, truth).mean()
 
 def generate_samples(model):
@@ -120,9 +127,6 @@ if __name__ == '__main__':
     PixelCNN = create_network()
     (x_train, _), (x_test, _) = mnist.load_data()
 
-    y_train = x_train.reshape((len(x_train), 784,1)).astype('int32')
-    # Dirty fix, fool keras with nans
-
     x_train = x_train.astype('float32') / 255
     x_test = x_test.astype('float32') / 255
     x_train = x_train.reshape((len(x_train), n_channel, mnist_dim, mnist_dim))
@@ -131,7 +135,7 @@ if __name__ == '__main__':
     print "Starting training"
     PixelCNN.fit(
         x_train,
-        y_train,
+        x_train,
         nb_epoch=nb_epoch,
         batch_size=batch_size,
         validation_data=(x_test, x_test),
