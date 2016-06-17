@@ -1,5 +1,7 @@
 """ Implementing pixelCNN in Blocks"""
 import sys
+import numpy as np
+import theano
 from theano import tensor as T
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp
@@ -27,8 +29,8 @@ batch_size = 16
 mnist_dim = 28
 nb_epoch = 100
 n_channel = 1
-patience = 3
-path = '/data/lisa/exp/alitaiga/Generative-models'
+patience = 2
+path = '/data/lisa/exp/alitaiga/Generative-models/test'
 sources = ('features',)
 
 MODE = '256ary'  # choice with 'binary' and '256ary
@@ -46,6 +48,10 @@ second_layer = ((3, 3), 32, 32)
 third_layer = (256 if MODE == '256ary' else 1, 1, 1)
 
 class ConvolutionalNoFlip(Convolutional) :
+    def __init__(self, *args, **kwargs):
+        self.mask = kwargs.pop('mask', None)
+        super(ConvolutionalNoFlip, self).__init__(*args, **kwargs)
+
     @application(inputs=['input_'], outputs=['output'])
     def apply(self, input_):
         """Perform the convolution.
@@ -74,6 +80,18 @@ class ConvolutionalNoFlip(Convolutional) :
             input_shape = (self.batch_size, self.num_channels)
             input_shape += self.image_size
 
+        if self.mask:
+            filter_shape = (self.num_filters, self.num_channels) + self.filter_size
+            mask = np.ones(filter_shape, dtype=theano.config.floatX)
+            middle = filter_shape[2] // 2
+            mask[middle+1:,:] = 0.
+            if self.mask == 'A':
+                mask[middle,middle:] = 0.
+            elif self.mask == 'B':
+                mask[middle,middle+1:] = 0.
+            self.W.set_value(self.W.get_value() * mask)
+            assert self.W.get_value().shape == filter_shape
+
         output = self.conv2d_impl(
             input_, self.W,
             input_shape=input_shape,
@@ -92,17 +110,18 @@ class ConvolutionalNoFlip(Convolutional) :
 def create_network():
     # Creating pixelCNN architecture
     inputs = T.matrix('features')
-    y = T.lmatrix('features')
-    conv_list = [ConvolutionalNoFlip(*first_layer)]
+    x = inputs / 255.
+    #y = T.itensor4('targets')
+    conv_list = [ConvolutionalNoFlip(*first_layer, mask='A')]
     for i in range(n_layer):
-        conv_list.extend([ConvolutionalNoFlip(*second_layer), Rectifier()])
+        conv_list.extend([ConvolutionalNoFlip(*second_layer, mask='B'), Rectifier()])
 
-    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 32), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 64), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 128, 64), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 256, 128)])
+    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 32, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 64, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 128, 64, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 256, 128, mask='B')])
 
-    model = ConvolutionalSequence(
+    sequence = ConvolutionalSequence(
         conv_list,
         num_channels=1,
         batch_size=batch_size,
@@ -112,15 +131,15 @@ def create_network():
         biases_init=Constant(0.02),
         tied_biases=False
     )
-    model.initialize()
-    x = model.apply(inputs)
+    sequence.initialize()
+    x = sequence.apply(x.reshape((batch_size, 1, mnist_dim, mnist_dim)))
     x = x.dimshuffle(1,0,2,3)
     x = x.flatten(ndim=3)
     x = x.flatten(ndim=2)
     x = x.dimshuffle(1,0)
     y_hat = Softmax().apply(x)
 
-    cost = CategoricalCrossEntropy().apply(y.flatten(), y_hat)
+    cost = CategoricalCrossEntropy().apply(T.cast(inputs.flatten(), 'int64'), y_hat)
     cost.name = 'cross_entropy'
     return cost
 
@@ -159,14 +178,15 @@ if __name__ == '__main__':
             mnist,
             iteration_scheme=ShuffledScheme(mnist.num_examples, batch_size)
         ),
-        which_sources='features'
+        which_sources=sources
     )
+    # import ipdb; ipdb.set_trace()
     test_stream = Flatten(
         DataStream.default_stream(
             mnist_test,
             iteration_scheme=ShuffledScheme(mnist_test.num_examples, batch_size)
         ),
-        which_sources='features'
+        which_sources=sources
     )
     "Print data loaded"
 
@@ -179,3 +199,4 @@ if __name__ == '__main__':
         model=model,
         extensions=extensions
     )
+    main_loop.run()
