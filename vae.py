@@ -42,7 +42,7 @@ x_reconstruct = decoder_mean(h_decod)
 
 def vae_loss(x_, x_reconstruct):
     rec_loss = binary_crossentropy(x_, x_reconstruct)
-    kl_loss = - 0.5 * K.mean(1 + 2*K.log(z_std + 1e-10) - K.square(z_mean) - K.square(z_std), axis=-1)
+    kl_loss = - 0.5 * K.mean(1 + 2*K.log(z_std + 1e-10) - z_mean**2 - z_std**2, axis=-1)
     return rec_loss + kl_loss
 
 vae = Model(x, x_reconstruct)

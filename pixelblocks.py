@@ -22,7 +22,6 @@ from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 from fuel.transformers import Flatten
 
-
 sys.setrecursionlimit(500000)
 
 batch_size = 16
