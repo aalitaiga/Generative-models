@@ -5,17 +5,20 @@ import theano
 from theano import tensor as T
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp
-from blocks.bricks.base import application
 from blocks.bricks.conv import ConvolutionalSequence, Convolutional
-from blocks.bricks import Rectifier, Softmax
+from blocks.bricks import application, Rectifier, Softmax, Random
 from blocks.bricks.cost import CategoricalCrossEntropy
-from blocks.initialization import IsotropicGaussian, Constant
-from blocks.main_loop import MainLoop
-from blocks.model import Model
 from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
 from blocks.extensions.monitoring import DataStreamMonitoring, TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint, Load
+from blocks.graph import ComputationGraph
+from blocks.initialization import IsotropicGaussian, Constant
+from blocks.main_loop import MainLoop
+from blocks.model import Model
+from blocks.serialization import dump, load
+from blocks.filter import VariableFilter
+from blocks.roles import OUTPUT
 
 from fuel.datasets import MNIST
 from fuel.streams import DataStream
@@ -25,12 +28,15 @@ from fuel.transformers import Flatten
 sys.setrecursionlimit(500000)
 
 batch_size = 16
-mnist_dim = 28
-nb_epoch = 100
+img_dim = 28
+nb_epoch = 200
 n_channel = 1
 patience = 2
-path = '/data/lisa/exp/alitaiga/Generative-models/test'
+path = '/data/lisa/exp/alitaiga/Generative-models/checkpoint'
 sources = ('features',)
+train = True
+resume = False
+seed = 2
 
 MODE = '256ary'  # choice with 'binary' and '256ary
 
@@ -122,16 +128,16 @@ def create_network():
 
     sequence = ConvolutionalSequence(
         conv_list,
-        num_channels=1,
+        num_channels=n_channel,
         batch_size=batch_size,
-        image_size=(mnist_dim,mnist_dim),
+        image_size=(img_dim,img_dim),
         border_mode='half',
         weights_init=IsotropicGaussian(std=0.05, mean=0),
         biases_init=Constant(0.02),
         tied_biases=False
     )
     sequence.initialize()
-    x = sequence.apply(x.reshape((batch_size, 1, mnist_dim, mnist_dim)))
+    x = sequence.apply(x.reshape((batch_size, n_channel, img_dim, img_dim)))
     x = x.dimshuffle(1,0,2,3)
     x = x.flatten(ndim=3)
     x = x.flatten(ndim=2)
@@ -149,9 +155,10 @@ def prepare_opti(cost, test):
     algorithm = GradientDescent(
         cost=cost,
         parameters=model.parameters,
-        step_rule=Adam(),
+        step_rule=RMSProp(),
         on_unused_sources='ignore'
     )
+
     extensions = [
         FinishAfter(after_n_epochs=nb_epoch),
         FinishIfNoImprovementAfter(notification_name='test_cross_entropy', epochs=patience),
@@ -167,13 +174,53 @@ def prepare_opti(cost, test):
         ProgressBar(),
         Checkpoint(path, after_epoch=True)
     ]
+
+    if resume:
+        print "Restoring from previous breakpoint"
+        extensions.extend([
+            Load(path)
+        ])
+
     return model, algorithm, extensions
+
+# Sampler used to sample from the discret distribution of the softmax
+class Sampler(Random):
+
+    @application
+    def apply(self, featuremap):
+        f = self.theano_rng.multinomial(pvals=featuremap, dtype=theano.config.floatX)
+        f = T.argmax(f, axis=1) / 255.
+        return f.reshape((batch_size, n_channel, img_dim, img_dim))
+
+def sampling(model, input=None, location=(0,0,0)):
+    # Sample image from the learnt model
+    # model: trained model
+    # input: input image to start the reconstruction
+    # location: (x, y, channel) tuple for the location of the first pixel to predict
+    # x for row, y for columns
+
+    net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
+    pred = Sampler(theano_seed=seed).apply(net_output)
+    forward = ComputationGraph(pred).get_theano_function()
+
+    # Need to replace by a scan??
+    output = np.zeros((batch_size, n_channel, img_dim, img_dim), dtype=np.float32)
+    x, y, c = location
+    if input is not None:
+        output[:,:c+1,:x,:y] = input[:,:c+1,:x,:y]
+    for row in range(x, img_dim):
+        col_ind = y * (row == x) # Start at column y for the first row
+        for col in range(col_ind, img_dim):
+            for chan in range(n_channel):
+                prediction = forward(output)
+                output[:,chan,row,col] = prediction[:,chan,row,col]
+    return output
 
 if __name__ == '__main__':
     mnist = MNIST(("train",))
     mnist_test = MNIST(("test",))
     training_stream = Flatten(
-        DataStream.default_stream(
+        DataStream(
             mnist,
             iteration_scheme=ShuffledScheme(mnist.num_examples, batch_size)
         ),
@@ -181,7 +228,7 @@ if __name__ == '__main__':
     )
     # import ipdb; ipdb.set_trace()
     test_stream = Flatten(
-        DataStream.default_stream(
+        DataStream(
             mnist_test,
             iteration_scheme=ShuffledScheme(mnist_test.num_examples, batch_size)
         ),
@@ -189,13 +236,17 @@ if __name__ == '__main__':
     )
     "Print data loaded"
 
-    cost = create_network()
-    model, algorithm, extensions = prepare_opti(cost, test_stream)
+    if train:
+        cost = create_network()
+        model, algorithm, extensions = prepare_opti(cost, test_stream)
 
-    main_loop = MainLoop(
-        algorithm=algorithm,
-        data_stream=training_stream,
-        model=model,
-        extensions=extensions
-    )
-    main_loop.run()
+        main_loop = MainLoop(
+            algorithm=algorithm,
+            data_stream=training_stream,
+            model=model,
+            extensions=extensions
+        )
+        main_loop.run()
+        dump(main_loop.model, open('pixelcnn.pkl', 'w'))
+    else:
+        model = load(open('pixelcnn.pkl', 'r'))

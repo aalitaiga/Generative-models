@@ -16,6 +16,7 @@ latent_dim = 2
 hidden_dim = 500
 epsilon = 0.01
 nb_epoch = 40
+patience = 1
 
 # Encoder
 x = Input(batch_shape=(batch_size,mnist_dim))
@@ -65,7 +66,7 @@ vae.fit(
     nb_epoch=nb_epoch,
     batch_size=batch_size,
     validation_data=(x_test, x_test),
-    callbacks=[EarlyStopping(patience=1)]
+    callbacks=[EarlyStopping(patience=patience)]
 )
 
 vae.save_weights('vae_weights.h5')
