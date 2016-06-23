@@ -1,5 +1,10 @@
 """ Implementing VAE in blcks"""
 
+import matplotlib.pyplot as plt
+import numpy as np
+import theano
+from theano import tensor as T
+
 from blocks.algorithms import GradientDescent, Adam
 from blocks.bricks import application, MLP, Rectifier, Random, Logistic, Tanh
 from blocks.bricks.cost import Cost
@@ -16,29 +21,27 @@ from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 from fuel.transformers import Flatten
 
-import theano
-from theano import tensor as T
-import matplotlib.pyplot as plt
-import numpy as np
+from utils import SaveModel
 
 batch_size = 100
-mnist_dim = 784
+save_every = 10
+img_dim = 28
 latent_dim = 2
 hidden_dim = 500
-epsilon = 0.01
-nb_epoch = 50
+epsilon = 1
+nb_epoch = 40
 patience = 1
 seed = 2
 sources = (u'features',)
-train = True
+train = False
 
 class Sampling(Random):
 
     @application
-    def apply(self, args):
+    def apply(self, args, batch=batch_size):
         mean, log_std = args
         eps = self.theano_rng.normal(
-            size=(batch_size,latent_dim),
+            size=(batch,latent_dim),
             avg=0.0,
             std=epsilon
         )
@@ -48,16 +51,17 @@ class VAEloss(Cost):
 
     @application
     def apply(self, x_, x_r, z_m, z_lstd):
-        rec_loss = T.nnet.binary_crossentropy(x_r, x_).mean(axis=-1).mean()
+        rec_loss = T.nnet.binary_crossentropy(x_r, x_).mean(axis=1).mean()
         kl_loss = - 0.5 * T.sum(1 + 2*z_lstd - z_m**2 - T.exp(2*z_lstd), axis=1).mean()
         return rec_loss + kl_loss
 
-def create_network():
-    # Encoder
-    x = T.matrix(u'features') / 255.
+def create_network(x=None):
+    x = T.matrix('features') if x is None else x
+    x = x / 255.
+
     encoder = MLP(
-        activations=[Rectifier(), Logistic()],
-        dims=[mnist_dim, hidden_dim, 2*latent_dim],
+        activations=[Rectifier(), Rectifier()],
+        dims=[img_dim**2, hidden_dim, 2*latent_dim],
         weights_init=IsotropicGaussian(std=0.01, mean=0),
         biases_init=Constant(0.01),
         name='encoder'
@@ -67,8 +71,8 @@ def create_network():
     z = Sampling(theano_seed=seed).apply([z_mean, z_log_std])
     # Decoder
     decoder = MLP(
-        activations=[Rectifier(), Logistic()],
-        dims=[latent_dim, hidden_dim, mnist_dim],
+        activations=[Tanh(), Logistic()],
+        dims=[latent_dim, hidden_dim, img_dim**2],
         weights_init=IsotropicGaussian(std=0.01, mean=0),
         biases_init=Constant(0.01),
         name='decoder'
@@ -80,8 +84,8 @@ def create_network():
     decoder.initialize()
 
     cost = VAEloss().apply(x, x_reconstruct, z_mean, z_log_std)
-    cost.name = 'total_cost'
-    return cost, encoder, decoder
+    cost.name = 'vae_cost'
+    return cost
 
 
 def prepare_opti(cost, test):
@@ -91,7 +95,7 @@ def prepare_opti(cost, test):
 
     extensions = [
         FinishAfter(after_n_epochs=nb_epoch),
-        FinishIfNoImprovementAfter(notification_name='test_total_cost', epochs=patience),
+        FinishIfNoImprovementAfter(notification_name='test_vae_cost', epochs=patience),
         TrainingDataMonitoring(
             [algorithm.cost],
             after_epoch=True),
@@ -100,7 +104,8 @@ def prepare_opti(cost, test):
             test,
             prefix="test"),
         Printing(),
-        ProgressBar()
+        ProgressBar(),
+        SaveModel(name='pixelcnn', after_n_epochs=save_every)
     ]
     return model, algorithm, extensions
 
@@ -124,7 +129,7 @@ if __name__ == '__main__':
     )
 
     if train:
-        cost, encoder, decoder = create_network()
+        cost = create_network()
         model, algorithm, extensions = prepare_opti(cost, data_stream_test)
 
         main_loop = MainLoop(
@@ -135,19 +140,18 @@ if __name__ == '__main__':
         )
 
         main_loop.run()
-        dump(main_loop.model, open('weights.pkl', 'w'))
+        dump(main_loop.model, open('vae.pkl', 'w'))
         model = main_loop.model
+        print 'Training finished model saved'
     else:
-        model = load(open('weights.pkl', 'r'))
-    for brick in model.top_bricks :
-        if brick.name == 'encoder' :
+        model = load(open('weights2.pkl', 'r'))
+    for brick in model.get_top_bricks():
+        if brick.name == 'encoder':
             encoder = brick
-        if brick.name == 'decoder' :
+        if brick.name == 'decoder':
             generator = brick
 
-    print 'Training finished model saved'
-
-
+    # Copy-pasted from https://github.com/fchollet/keras/blob/master/examples/variational_autoencoder.py
     x_test, y_test = MNIST(("test",)).get_data(state=None, request=range(10000))
     a = T.matrix(u'features')
     b = encoder.apply(a)
@@ -157,8 +161,10 @@ if __name__ == '__main__':
 
     # display a 2D plot of the digit classes in the latent space
     x_test_encoded = encode(x_test.reshape((10000,784)))[0]
+    y_test = y_test.reshape((10000,)).astype('uint8')
+    #import ipdb; ipdb.set_trace()
     plt.figure(figsize=(6, 6))
-    plt.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test.reshape((10000,)))
+    plt.scatter(x_test_encoded[:, 0], x_test_encoded[:, 1], c=y_test)
     plt.colorbar()
     plt.show()
 

@@ -25,6 +25,8 @@ from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 from fuel.transformers import Flatten
 
+from utils import SaveModel
+
 sys.setrecursionlimit(500000)
 
 batch_size = 16
@@ -36,20 +38,15 @@ path = '/data/lisa/exp/alitaiga/Generative-models/checkpoint'
 sources = ('features',)
 train = True
 resume = False
+save_every = 5  # Save model every m-th epoch
 seed = 2
 
 MODE = '256ary'  # choice with 'binary' and '256ary
 
-if MODE == 'binary':
-    activation = 'sigmoid'
-    loss = 'binary_crossentropy'
-elif MODE == '256ary':
-    activation = 'softmax'
-    loss = 'categorical_crossentropy'
 n_layer = 6
 res_connections = True
-first_layer = ((7, 7), 32, n_channel)
-second_layer = ((3, 3), 32, 32)
+first_layer = ((7, 7), 32*n_channel, n_channel)
+second_layer = ((3, 3), 32*n_channel, 32*n_channel)
 third_layer = (256 if MODE == '256ary' else 1, 1, 1)
 
 class ConvolutionalNoFlip(Convolutional) :
@@ -88,14 +85,18 @@ class ConvolutionalNoFlip(Convolutional) :
         if self.mask:
             filter_shape = (self.num_filters, self.num_channels) + self.filter_size
             mask = np.ones(filter_shape, dtype=theano.config.floatX)
-            middle = filter_shape[2] // 2
-            mask[middle+1:,:] = 0.
-            if self.mask == 'A':
-                mask[middle,middle:] = 0.
-            elif self.mask == 'B':
-                mask[middle,middle+1:] = 0.
+            center = filter_shape[2] // 2
+
+            # Channels are split to have access to different information from the past
+            mask[:,:,center+1:,:] = 0.
+            mask[:,:,center,center+1:] = 0.
+            for i in xrange(self.num_channels):
+                for j in xrange(self.num_channels):
+                    if (self.mask == 'A' and i >= j) or (self.mask == 'B' and i > j):
+                        mask[
+                            j::self.num_channels,i::self.num_channels,center,center
+                        ] = 0.
             self.W.set_value(self.W.get_value() * mask)
-            assert self.W.get_value().shape == filter_shape
 
         output = self.conv2d_impl(
             input_, self.W,
@@ -112,24 +113,31 @@ class ConvolutionalNoFlip(Convolutional) :
                 output += self.b.dimshuffle('x', 0, 1, 2)
         return output
 
-def create_network():
-    # Creating pixelCNN architecture
-    inputs = T.matrix('features')
+class ConvolutionalNoFlipWithRes(ConvolutionalNoFlip):
+
+    @application(inputs=['input_'], outputs=['output'])
+    def apply(self, input_):
+        output =
+
+def create_network(inputs=None, batch=batch_size):
+    if inputs is None:
+        inputs = T.matrix('features')
     x = inputs / 255.
-    #y = T.itensor4('targets')
+
+    # PixelCNN architecture
     conv_list = [ConvolutionalNoFlip(*first_layer, mask='A')]
     for i in range(n_layer):
         conv_list.extend([ConvolutionalNoFlip(*second_layer, mask='B'), Rectifier()])
 
-    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 32, mask='B'), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((3,3), 64, 64, mask='B'), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 128, 64, mask='B'), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 256, 128, mask='B')])
+    conv_list.extend([ConvolutionalNoFlip((3,3), 64*n_channel, 32*n_channel, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((3,3), 64*n_channel, 64*n_channel, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, 64*n_channel, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, 128*n_channel, mask='B')])
 
     sequence = ConvolutionalSequence(
         conv_list,
         num_channels=n_channel,
-        batch_size=batch_size,
+        batch_size=batch,
         image_size=(img_dim,img_dim),
         border_mode='half',
         weights_init=IsotropicGaussian(std=0.05, mean=0),
@@ -137,7 +145,7 @@ def create_network():
         tied_biases=False
     )
     sequence.initialize()
-    x = sequence.apply(x.reshape((batch_size, n_channel, img_dim, img_dim)))
+    x = sequence.apply(x.reshape((batch, n_channel, img_dim, img_dim)))
     x = x.dimshuffle(1,0,2,3)
     x = x.flatten(ndim=3)
     x = x.flatten(ndim=2)
@@ -172,7 +180,8 @@ def prepare_opti(cost, test):
             prefix="test"),
         Printing(),
         ProgressBar(),
-        Checkpoint(path, after_epoch=True)
+        Checkpoint(path, after_epoch=True),
+        SaveModel(name='pixelcnn', after_n_epochs=save_every)
     ]
 
     if resume:
@@ -187,12 +196,12 @@ def prepare_opti(cost, test):
 class Sampler(Random):
 
     @application
-    def apply(self, featuremap):
+    def apply(self, featuremap, batch=batch_size):
         f = self.theano_rng.multinomial(pvals=featuremap, dtype=theano.config.floatX)
         f = T.argmax(f, axis=1) / 255.
-        return f.reshape((batch_size, n_channel, img_dim, img_dim))
+        return f.reshape((batch, n_channel, img_dim, img_dim))
 
-def sampling(model, input=None, location=(0,0,0)):
+def sampling(model, input=None, location=(0,0,0), batch=batch_size):
     # Sample image from the learnt model
     # model: trained model
     # input: input image to start the reconstruction
@@ -200,16 +209,16 @@ def sampling(model, input=None, location=(0,0,0)):
     # x for row, y for columns
 
     net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
-    pred = Sampler(theano_seed=seed).apply(net_output)
+    pred = Sampler(theano_seed=seed).apply(net_output, batch=batch)
     forward = ComputationGraph(pred).get_theano_function()
 
     # Need to replace by a scan??
-    output = np.zeros((batch_size, n_channel, img_dim, img_dim), dtype=np.float32)
+    output = np.zeros((batch, n_channel, img_dim, img_dim), dtype=np.float32)
     x, y, c = location
     if input is not None:
         output[:,:c+1,:x,:y] = input[:,:c+1,:x,:y]
     for row in range(x, img_dim):
-        col_ind = y * (row == x) # Start at column y for the first row
+        col_ind = y * (row == x)  # Start at column y for the first row
         for col in range(col_ind, img_dim):
             for chan in range(n_channel):
                 prediction = forward(output)
