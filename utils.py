@@ -8,5 +8,5 @@ class SaveModel(SimpleExtension) :
 
     def do(self, which_callback, *args) :
         model = self.main_loop.model
-        dump(model, open(self.name + 'epoch_' + 
-            self.main_loop.log.status['epochs_done'] + '.pkl', 'w'))
+        dump(model, open(self.name + '_epoch_' +
+            str(self.main_loop.log.status['epochs_done']) + '.pkl', 'w'))

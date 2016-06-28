@@ -6,7 +6,7 @@ import theano
 from theano import tensor as T
 
 from blocks.algorithms import GradientDescent, Adam
-from blocks.bricks import application, MLP, Rectifier, Random, Logistic, Tanh
+from blocks.bricks import application, MLP, Rectifier, Random, Logistic, Tanh, Identity
 from blocks.bricks.cost import Cost
 from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
@@ -23,17 +23,17 @@ from fuel.transformers import Flatten
 
 from utils import SaveModel
 
-batch_size = 100
+batch_size = 16
 save_every = 10
 img_dim = 28
 latent_dim = 2
-hidden_dim = 500
-epsilon = 1
+hidden_dim = 128
+epsilon = 0.01
 nb_epoch = 40
 patience = 1
 seed = 2
 sources = (u'features',)
-train = False
+train = True
 
 class Sampling(Random):
 
@@ -60,7 +60,7 @@ def create_network(x=None):
     x = x / 255.
 
     encoder = MLP(
-        activations=[Rectifier(), Rectifier()],
+        activations=[Rectifier(), Identity()],
         dims=[img_dim**2, hidden_dim, 2*latent_dim],
         weights_init=IsotropicGaussian(std=0.01, mean=0),
         biases_init=Constant(0.01),
@@ -71,7 +71,7 @@ def create_network(x=None):
     z = Sampling(theano_seed=seed).apply([z_mean, z_log_std])
     # Decoder
     decoder = MLP(
-        activations=[Tanh(), Logistic()],
+        activations=[Rectifier(), Logistic()],
         dims=[latent_dim, hidden_dim, img_dim**2],
         weights_init=IsotropicGaussian(std=0.01, mean=0),
         biases_init=Constant(0.01),
@@ -105,7 +105,7 @@ def prepare_opti(cost, test):
             prefix="test"),
         Printing(),
         ProgressBar(),
-        SaveModel(name='pixelcnn', after_n_epochs=save_every)
+        #SaveModel(name='vae', after_n_epochs=save_every)
     ]
     return model, algorithm, extensions
 
