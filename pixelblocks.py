@@ -35,16 +35,16 @@ img_dim = 28
 nb_epoch = 250
 n_channel = 1
 patience = 3
-path = '/data/lisa/exp/alitaiga/Generative-models/checkpoint'
+path = 'checkpoint.pkl'
 sources = ('features',)
-train = True
+train = False
 resume = False
-save_every = 10  # Save model every m-th epoch
+save_every = 15  # Save model every m-th epoch
 seed = 2
 
 MODE = 'binary'  # choice with 'binary' and '256ary
 
-n_layer = 10
+n_layer = 8
 res_connections = True
 first_layer = ((7, 7), 32*n_channel, n_channel)
 second_layer = ((3, 3), 32*n_channel, 32*n_channel)
@@ -125,18 +125,17 @@ class ConvolutionalNoFlipWithRes(ConvolutionalNoFlip):
         output = ConvolutionalNoFlip.apply(self, input_)
         return input_ + output if res_connections else output
 
-def create_network(inputs=None, batch=batch_size):
-    if inputs is None:
-        inputs = T.tensor4('features')
-    x = inputs / 255. if MODE == '256ary' else inputs
+def create_network(x=None, batch=batch_size):
+    if x is None:
+        x = T.tensor4('features')
 
     # PixelCNN architecture
     conv_list = [ConvolutionalNoFlip(*first_layer, mask='A')]
     for i in range(n_layer):
         conv_list.extend([ConvolutionalNoFlipWithRes(*second_layer, mask='B'), Rectifier()])
 
-    #conv_list.extend([ConvolutionalNoFlip((3,3), 64*n_channel, 32*n_channel, mask='B'), Rectifier()])
-    #conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, 64*n_channel, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 32*n_channel, 32*n_channel, mask='B'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 32*n_channel, 32*n_channel, mask='B'), Rectifier()])
     conv_list.extend([ConvolutionalNoFlip(*third_layer, mask='B')])
 
     sequence = ConvolutionalSequence(
@@ -154,10 +153,10 @@ def create_network(inputs=None, batch=batch_size):
     if MODE == '256ary':
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1).reshape((-1,256))
         y_hat = Softmax().apply(x)
-        cost = CategoricalCrossEntropy().apply(T.cast(inputs.flatten(), 'int64'), y_hat)
+        cost = CategoricalCrossEntropy().apply(T.cast(x.flatten(), 'int64'), y_hat)
     else:
         y_hat = Logistic().apply(x)
-        cost = BinaryCrossEntropy().apply(inputs, y_hat)
+        cost = BinaryCrossEntropy().apply(x, y_hat)
     cost.name = 'pixelcnn_cost'
     return cost
 
@@ -203,15 +202,14 @@ class SamplerMultinomial(Random):
     @application
     def apply(self, featuremap, batch=batch_size):
         f = self.theano_rng.multinomial(pvals=featuremap, dtype=theano.config.floatX)
-        f = T.argmax(f, axis=1) / 255.
+        f = T.argmax(f, axis=1)
         return f.reshape((batch, n_channel, img_dim, img_dim))
 
 class SamplerBinomial(Random):
 
     @application
     def apply(self, featuremap, batch=batch_size):
-        f = self.theano_rng.binomial(p=featuremap, dtype=theano.config.floatX)
-        return f.reshape((batch, n_channel, img_dim, img_dim))
+        return T.lt(self.theano_rng.uniform(size=(batch, 1, img_dim, img_dim)), featuremap)
 
 def sampling(model, input=None, location=(0,0,0), batch=batch_size):
     # Sample image from the learnt model
@@ -247,14 +245,16 @@ if __name__ == '__main__':
         data_test = BinarizedMNIST(("test",))
     else:
         pass  # Add CIFAR 10
-    training_stream = DataStream(
+    training_stream = DataStream.default_stream(
         data,
-        iteration_scheme=ShuffledScheme(data.num_examples, batch_size)
+        iteration_scheme=ShuffledScheme(data.num_examples, batch_size),
+        which_sources=sources
     )
     # import ipdb; ipdb.set_trace()
-    test_stream = DataStream(
+    test_stream = DataStream.default_stream(
         data_test,
-        iteration_scheme=ShuffledScheme(data_test.num_examples, batch_size)
+        iteration_scheme=ShuffledScheme(data_test.num_examples, batch_size),
+        which_sources=sources
     )
     "Print data loaded"
 
@@ -272,7 +272,7 @@ if __name__ == '__main__':
         dump(main_loop.model, open('pixelcnn.pkl', 'w'))
         model = main_loop.model
     else:
-        model = load(open('pixelcnn_epoch_60.pkl', 'r'))
+        model = load(open('pixelcnn_epoch_220.pkl', 'r'))
 
     # Generate some samples
     samples = sampling(model)
