@@ -67,14 +67,12 @@ class ConvolutionalNoFlip(Convolutional) :
             # Channels are split to have access to different information from the past
             mask[:,:,center+1:,:] = 0.
             mask[:,:,center,center+1:] = 0.
-            if self.mask_type == 'A':
-                mask[:,:,center,center] = 0.
-            # for i in xrange(self.num_channels):
-            #     for j in xrange(self.num_channels):
-            #         if (self.mask == 'A' and i >= j) or (self.mask == 'B' and i > j):
-            #             mask[
-            #                 j::self.num_channels,i::self.num_channels,center,center
-            #             ] = 0.
+            for i in xrange(self.num_channels):
+                for j in xrange(self.num_channels):
+                    if (self.mask == 'A' and i >= j) or (self.mask == 'B' and i > j):
+                        mask[
+                            j::self.num_channels,i::self.num_channels,center,center
+                        ] = 0.
             self.mask = mask
 
     @application(inputs=['input_'], outputs=['output'])
@@ -138,9 +136,9 @@ def create_network(inputs=None, batch=batch_size):
     for i in range(n_layer):
         conv_list.extend([ConvolutionalNoFlipWithRes(*second_layer, mask='B', name=str(i+1)), Rectifier()])
 
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, h*n_channel, mask='B', name=str(n_layer)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, h*n_channel, mask='B', name=str(n_layer)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, 128*n_channel, mask='B', name=str(n_layer))])
+    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, h*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, 128*n_channel, mask='B', name=str(n_layer+3))])
 
     sequence = ConvolutionalSequence(
         conv_list,
@@ -152,6 +150,7 @@ def create_network(inputs=None, batch=batch_size):
         biases_init=Constant(0.02),
         tied_biases=False
     )
+    sequence.push_initialization_config()
     sequence.initialize()
     x = sequence.apply(x)
     if MODE == '256ary':
@@ -210,12 +209,12 @@ def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
     return output
 
 def prepare_opti(cost, test):
-    model = Model(cost)
+    model_ = Model(cost)
     print "Model created"
 
     algorithm = GradientDescent(
         cost=cost,
-        parameters=model.parameters,
+        parameters=model_.parameters,
         step_rule=Adam(),
         on_unused_sources='ignore'
     )
@@ -243,7 +242,7 @@ def prepare_opti(cost, test):
             Load(path)
         ])
 
-    return model, algorithm, extensions
+    return model_, algorithm, extensions
 
 if __name__ == '__main__':
     # parser = argparse.ArgumentParser()
