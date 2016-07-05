@@ -52,6 +52,7 @@ def create_vae(x=None, batch=batch_size):
         biases_init=Constant(0.01),
         name='encoder'
     )
+    encoder.initialize()
     z_param = encoder.apply(x)
     z_mean, z_log_std = z_param[:,latent_dim:], z_param[:,:latent_dim]
     z = Sampling(theano_seed=seed).apply([z_mean, z_log_std], batch=batch_size)
@@ -63,11 +64,8 @@ def create_vae(x=None, batch=batch_size):
         biases_init=Constant(0.01),
         name='decoder'
     )
-
-    x_reconstruct = decoder.apply(z)
-
-    encoder.initialize()
     decoder.initialize()
+    x_reconstruct = decoder.apply(z)
 
     cost = VAEloss().apply(x, x_reconstruct, z_mean, z_log_std)
     cost.name = 'vae_cost'

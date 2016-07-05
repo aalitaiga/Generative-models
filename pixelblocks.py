@@ -17,7 +17,7 @@ from blocks.model import Model
 from blocks.serialization import dump, load
 from blocks.filter import VariableFilter
 from blocks.roles import OUTPUT
-from fuel.datasets import BinarizedMNIST, MNIST
+from fuel.datasets import BinarizedMNIST, MNIST, CIFAR10
 from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 import numpy as np
@@ -25,17 +25,21 @@ import theano
 from theano import tensor as T
 from scipy.misc import imsave
 
-from utils import SaveModel
+from utils import SaveModel, ApplyMask
 
 sys.setrecursionlimit(500000)
 
 batch_size = 16
-dataset = "mnist"
-img_dim = 28
-nb_epoch = 25
-n_channel = 1
+dataset = "cifar10"
+if dataset in ("mnist", "binarized_mnist"):
+    img_dim = 28
+    n_channel = 1
+elif dataset == "cifar10":
+    img_dim = 32
+    n_channel = 3
+nb_epoch = 250
 patience = 3
-path = 'checkpoint.pkl'
+path = 'checkpoint_{}.pkl'.format(dataset)
 sources = ('features',)
 train = True
 resume = False
@@ -44,21 +48,23 @@ seed = 2
 
 MODE = '256ary'  # choice with 'binary' and '256ary
 
-n_layer = 3
+n_layer = 8
 res_connections = False
 h = 32
-first_layer = ((7, 7), h*n_channel, n_channel)
-second_layer = ((3, 3), h*n_channel, h*n_channel)
+first_layer = ((7, 7), h*n_channel)
+second_layer = ((3, 3), h*n_channel)
 if MODE == '256ary':
-    third_layer = ((1, 1), 256*n_channel, h*n_channel)
+    third_layer = ((1, 1), 256*n_channel)
 else:
-    third_layer = ((1, 1), 1, h*n_channel)
+    third_layer = ((1, 1), 1)
 
 class ConvolutionalNoFlip(Convolutional) :
     def __init__(self, *args, **kwargs):
         self.mask_type = kwargs.pop('mask', None)
         Convolutional.__init__(self, *args, **kwargs)
 
+    def push_allocation_config(self):
+        super(ConvolutionalNoFlip, self).push_allocation_config()
         if self.mask_type:
             filter_shape = (self.num_filters, self.num_channels) + self.filter_size
             mask = np.ones(filter_shape, dtype=theano.config.floatX)
@@ -67,11 +73,16 @@ class ConvolutionalNoFlip(Convolutional) :
             # Channels are split to have access to different information from the past
             mask[:,:,center+1:,:] = 0.
             mask[:,:,center,center+1:] = 0.
-            for i in xrange(self.num_channels):
-                for j in xrange(self.num_channels):
-                    if (self.mask == 'A' and i >= j) or (self.mask == 'B' and i > j):
+            feat_per_out_channel = self.num_filters // n_channel
+            feat_per_in_channel = self.num_channels // n_channel
+            for i in xrange(n_channel):
+                for j in xrange(n_channel):
+                    if (self.mask_type == 'A' and j >= i) or (self.mask_type == 'B' and j > i):
                         mask[
-                            j::self.num_channels,i::self.num_channels,center,center
+                            i*feat_per_out_channel:(i + 1)*feat_per_out_channel,
+                            j*feat_per_in_channel:(j + 1)*feat_per_in_channel,
+                            center,
+                            center
                         ] = 0.
             self.mask = mask
 
@@ -103,7 +114,7 @@ class ConvolutionalNoFlip(Convolutional) :
             input_shape = (self.batch_size, self.num_channels)
             input_shape += self.image_size
 
-        self.W.set_value(self.W.get_value() * self.mask)
+        #self.W.set_value(self.W.get_value() * self.mask)
         output = self.conv2d_impl(
             input_, self.W,
             input_shape=input_shape,
@@ -134,11 +145,11 @@ def create_network(inputs=None, batch=batch_size):
     # PixelCNN architecture
     conv_list = [ConvolutionalNoFlip(*first_layer, mask='A', name='0'), Rectifier()]
     for i in range(n_layer):
-        conv_list.extend([ConvolutionalNoFlipWithRes(*second_layer, mask='B', name=str(i+1)), Rectifier()])
+        conv_list.extend([ConvolutionalNoFlip(*second_layer, mask='B', name=str(i+1)), Rectifier()])
 
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, h*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, 128*n_channel, mask='B', name=str(n_layer+3))])
+    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, mask='B', name=str(n_layer+3))])
 
     sequence = ConvolutionalSequence(
         conv_list,
@@ -150,15 +161,11 @@ def create_network(inputs=None, batch=batch_size):
         biases_init=Constant(0.02),
         tied_biases=False
     )
-    sequence.push_initialization_config()
     sequence.initialize()
     x = sequence.apply(x)
     if MODE == '256ary':
-        #x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1).reshape((-1,256))
-        x = x.dimshuffle(1,0,2,3)
-        x = x.flatten(ndim=3)
-        x = x.flatten(ndim=2)
-        x = x.dimshuffle(1,0)
+        x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
+        x = x.reshape((-1,256))
         x_hat = Softmax().apply(x)
         cost = CategoricalCrossEntropy().apply(T.cast(inputs.flatten(), 'int64'), x_hat)
     else:
@@ -209,12 +216,12 @@ def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
     return output
 
 def prepare_opti(cost, test):
-    model_ = Model(cost)
+    model = Model(cost)
     print "Model created"
 
     algorithm = GradientDescent(
         cost=cost,
-        parameters=model_.parameters,
+        parameters=model.parameters,
         step_rule=Adam(),
         on_unused_sources='ignore'
     )
@@ -232,17 +239,16 @@ def prepare_opti(cost, test):
             prefix="test"),
         Printing(),
         ProgressBar(),
+        ApplyMask(before_first_epoch=True, after_batch=True),
         Checkpoint(path, every_n_epochs=save_every),
-        SaveModel(name='pixelcnn', every_n_epochs=save_every)
+        SaveModel(name='pixelcnn_{}'.format(dataset), every_n_epochs=save_every)
     ]
 
     if resume:
-        print "Restoring from previous breakpoint"
-        extensions.extend([
-            Load(path)
-        ])
+        print "Restoring from previous checkpoint"
+        extensions.append(Load(path))
 
-    return model_, algorithm, extensions
+    return model, algorithm, extensions
 
 if __name__ == '__main__':
     # parser = argparse.ArgumentParser()
@@ -261,6 +267,9 @@ if __name__ == '__main__':
     elif dataset == 'binarized_mnist':
         data = BinarizedMNIST(("train",))
         data_test = BinarizedMNIST(("test",))
+    elif dataset == "cifar10":
+        data = CIFAR10(("train",))
+        data_test = CIFAR10(("test",))
     else:
         pass  # Add CIFAR 10
     training_stream = DataStream(
@@ -271,7 +280,7 @@ if __name__ == '__main__':
         data_test,
         iteration_scheme=ShuffledScheme(data_test.num_examples, batch_size)
     )
-    "Print data loaded"
+    "Print dataset: {} loaded".format(dataset)
 
     if train:
         cost = create_network()
@@ -292,6 +301,6 @@ if __name__ == '__main__':
 
     # Generate some samples
     samples = sampling(model)
-    samples = samples.reshape((16*28,28))
+    samples = samples.transpose((0,2,3,1)).reshape((batch_size*img_dim,img_dim,n_channel))
 
     imsave('{}_samples.jpg'.format(dataset), samples)
