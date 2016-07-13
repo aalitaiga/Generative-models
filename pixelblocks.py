@@ -30,13 +30,15 @@ from utils import SaveModel, ApplyMask
 sys.setrecursionlimit(500000)
 
 batch_size = 16
-dataset = "cifar10"
+dataset = "binarized_mnist"
 if dataset in ("mnist", "binarized_mnist"):
     img_dim = 28
     n_channel = 1
 elif dataset == "cifar10":
     img_dim = 32
     n_channel = 3
+MODE = "binary" if dataset == "binarized_mnist" else "256ary"
+
 nb_epoch = 250
 patience = 3
 path = 'checkpoint_{}.pkl'.format(dataset)
@@ -56,9 +58,9 @@ second_layer = ((3, 3), h*n_channel)
 if MODE == '256ary':
     third_layer = ((1, 1), 256*n_channel)
 else:
-    third_layer = ((1, 1), 1)
+    third_layer = ((1, 1), n_channel)
 
-class ConvolutionalNoFlip(Convolutional) :
+class ConvolutionalNoFlip(Convolutional):
     def __init__(self, *args, **kwargs):
         self.mask_type = kwargs.pop('mask', None)
         Convolutional.__init__(self, *args, **kwargs)
@@ -148,8 +150,8 @@ def create_network(inputs=None, batch=batch_size):
         conv_list.extend([ConvolutionalNoFlip(*second_layer, mask='B', name=str(i+1)), Rectifier()])
 
     conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 128*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), 256*n_channel, mask='B', name=str(n_layer+3))])
+    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip(**third_layer, mask='B', name=str(n_layer+3)])
 
     sequence = ConvolutionalSequence(
         conv_list,
@@ -167,12 +169,28 @@ def create_network(inputs=None, batch=batch_size):
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
         x = x.reshape((-1,256))
         x_hat = Softmax().apply(x)
-        cost = CategoricalCrossEntropy().apply(T.cast(inputs.flatten(), 'int64'), x_hat)
+        inp = T.cast(inputs.flatten(), 'int64')
+        cost = CategoricalCrossEntropy().apply(inp, x_hat)  * img_dim * img_dim
+        cost_bits_dim = categorical_crossentropy(log_softmax(pred), inp)
     else:
         x_hat = Logistic().apply(x)
-        cost = BinaryCrossEntropy().apply(inputs, x_hat)
-    cost.name = 'pixelcnn_cost'
-    return cost
+        cost = BinaryCrossEntropy().apply(inputs, x_hat) * img_dim * img_dim
+        cost_bits_dim = -(inputs * T.log2(x_hat) + (1.0 - inputs) * T.log2(1.0 - x_hat)).mean()
+    
+    cost_bits_dim.name = "nnl_bits_dim"
+    cost.name = 'loglikelihood_nat'
+    return cost, cost_bits_dim
+
+# Log of the softmax
+def log_softmax(x):
+    xdev = x - x.max(axis=1)[:, None]
+    lsm = xdev - T.log2(T.sum(T.exp(xdev), axis=1, keepdims=True))
+    return lsm
+
+# Categorical cross entropy for log_softmax inputs
+def categorical_crossentropy(pred, inputs):
+    loss_bits_dim = - T.mean(pred[T.arange(inputs.shape[0]), inputs])
+    return loss_bits_dim
 
 # Sampler used to sample from the discret distribution of the softmax
 class SamplerMultinomial(Random):
@@ -215,7 +233,7 @@ def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
                 output[:,chan,row,col] = prediction[:,chan,row,col]
     return output
 
-def prepare_opti(cost, test):
+def prepare_opti(cost, test, *args):
     model = Model(cost)
     print "Model created"
 
@@ -226,15 +244,19 @@ def prepare_opti(cost, test):
         on_unused_sources='ignore'
     )
 
+    to_monitor = [algorithm.cost]
+    if args:
+        to_monitor.extend(*args)
+
     extensions = [
         FinishAfter(after_n_epochs=nb_epoch),
-        FinishIfNoImprovementAfter(notification_name='test_pixelcnn_cost', epochs=patience),
+        FinishIfNoImprovementAfter(notification_name='loglikelihood_nat', epochs=patience),
         TrainingDataMonitoring(
-            [algorithm.cost],
+            to_monitor,
             prefix="train",
             after_epoch=True),
         DataStreamMonitoring(
-            [algorithm.cost],
+            to_monitor,
             test_stream,
             prefix="test"),
         Printing(),
@@ -283,8 +305,8 @@ if __name__ == '__main__':
     "Print dataset: {} loaded".format(dataset)
 
     if train:
-        cost = create_network()
-        model, algorithm, extensions = prepare_opti(cost, test_stream)
+        cost, cost_bits_dim = create_network()
+        model, algorithm, extensions = prepare_opti(cost, test_stream, cost_bits_dim)
 
         main_loop = MainLoop(
             algorithm=algorithm,
