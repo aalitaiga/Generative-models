@@ -1,5 +1,6 @@
 """ Implementing pixelCNN in Blocks"""
 import argparse
+import logging
 import sys
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp, AdaGrad
@@ -38,6 +39,9 @@ elif dataset == "cifar10":
     img_dim = 32
     n_channel = 3
 MODE = "binary" if dataset == "binarized_mnist" else "256ary"
+
+logging.basicConfig(filename='pixelcnn_{}.log'.format(dataset))
+logger = logging.getLogger(__name__)
 
 nb_epoch = 250
 patience = 3
@@ -141,7 +145,7 @@ class ConvolutionalNoFlipWithRes(ConvolutionalNoFlip):
 
 def create_network(inputs=None, batch=batch_size):
     if inputs is None:
-        inputs = T.tensor4('features')
+        inputs = T.ltensor4('features')
     x = T.cast(inputs,'float32') / 255. if dataset != 'binarized_mnist' else inputs
 
     # PixelCNN architecture
@@ -151,7 +155,7 @@ def create_network(inputs=None, batch=batch_size):
 
     conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
     conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip(**third_layer, mask='B', name=str(n_layer+3)])
+    conv_list.extend([ConvolutionalNoFlip(*third_layer, mask='B', name=str(n_layer+3))])
 
     sequence = ConvolutionalSequence(
         conv_list,
@@ -169,9 +173,8 @@ def create_network(inputs=None, batch=batch_size):
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
         x = x.reshape((-1,256))
         x_hat = Softmax().apply(x)
-        inp = T.cast(inputs.flatten(), 'int64')
-        cost = CategoricalCrossEntropy().apply(inp, x_hat)  * img_dim * img_dim
-        cost_bits_dim = categorical_crossentropy(log_softmax(pred), inp)
+        cost = CategoricalCrossEntropy().apply(inputs.flatten(), x_hat)  * img_dim * img_dim
+        cost_bits_dim = categorical_crossentropy(log_softmax(x), inputs.flatten())
     else:
         x_hat = Logistic().apply(x)
         cost = BinaryCrossEntropy().apply(inputs, x_hat) * img_dim * img_dim
@@ -215,7 +218,7 @@ def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
     # x for row, y for columns
 
     net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
-    print 'Output used: {}'.format(net_output)
+    logger.info('Output used: {}'.format(net_output))
     Sampler = SamplerMultinomial if MODE == '256ary' else SamplerBinomial
     pred = Sampler(theano_seed=seed).apply(net_output, batch=batch)
     forward = ComputationGraph(pred).get_theano_function()
@@ -235,7 +238,7 @@ def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
 
 def prepare_opti(cost, test, *args):
     model = Model(cost)
-    print "Model created"
+    logger.info("Model created")
 
     algorithm = GradientDescent(
         cost=cost,
@@ -246,7 +249,7 @@ def prepare_opti(cost, test, *args):
 
     to_monitor = [algorithm.cost]
     if args:
-        to_monitor.extend(*args)
+        to_monitor.extend(args)
 
     extensions = [
         FinishAfter(after_n_epochs=nb_epoch),
@@ -267,7 +270,7 @@ def prepare_opti(cost, test, *args):
     ]
 
     if resume:
-        print "Restoring from previous checkpoint"
+        logger.info("Restoring from previous checkpoint")
         extensions.append(Load(path))
 
     return model, algorithm, extensions
@@ -284,11 +287,11 @@ if __name__ == '__main__':
     #     help="Change default location to save model")
 
     if dataset == 'mnist':
-        data = MNIST(("train",))
-        data_test = MNIST(("test",))
+        data = MNIST(("train",), sources=('features',))
+        data_test = MNIST(("test",), sources=('features',))
     elif dataset == 'binarized_mnist':
-        data = BinarizedMNIST(("train",))
-        data_test = BinarizedMNIST(("test",))
+        data = BinarizedMNIST(("train",), sources=('features',))
+        data_test = BinarizedMNIST(("test",), sources=('features',))
     elif dataset == "cifar10":
         data = CIFAR10(("train",))
         data_test = CIFAR10(("test",))
@@ -302,7 +305,7 @@ if __name__ == '__main__':
         data_test,
         iteration_scheme=ShuffledScheme(data_test.num_examples, batch_size)
     )
-    "Print dataset: {} loaded".format(dataset)
+    logger.info("Dataset: {} loaded".format(dataset))
 
     if train:
         cost, cost_bits_dim = create_network()
