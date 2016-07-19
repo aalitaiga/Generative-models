@@ -1,6 +1,8 @@
 """ Implementing pixelCNN in Blocks"""
 import argparse
+from datetime import date
 import logging
+import os
 import sys
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp, AdaGrad
@@ -39,30 +41,34 @@ elif dataset == "cifar10":
     img_dim = 32
     n_channel = 3
 MODE = "binary" if dataset == "binarized_mnist" else "256ary"
+path = 'pixelcnn_{}_{}'.format(dataset, date.today())
 
-logging.basicConfig(filename='pixelcnn_{}.log'.format(dataset))
+if not os.path.exists(path):
+    os.makedirs(path)
+
+logging.basicConfig(filename=path+'/'+path+'.log',
+    level=logging.INFO,
+    format='%(message)s')
+logging.getLogger().addHandler(logging.StreamHandler())
+
 logger = logging.getLogger(__name__)
 
 nb_epoch = 250
-patience = 3
-path = 'checkpoint_{}.pkl'.format(dataset)
+patience = 5
+check = path+'/'+'checkpoint_{}.pkl'.format(dataset)
 sources = ('features',)
 train = True
 resume = False
 save_every = 5  # Save model every m-th epoch
 seed = 2
 
-MODE = '256ary'  # choice with 'binary' and '256ary
-
 n_layer = 8
 res_connections = False
 h = 32
 first_layer = ((7, 7), h*n_channel)
 second_layer = ((3, 3), h*n_channel)
-if MODE == '256ary':
-    third_layer = ((1, 1), 256*n_channel)
-else:
-    third_layer = ((1, 1), n_channel)
+third_layer = ((1, 1), 256*n_channel) if MODE == '256ary' else ((1, 1), n_channel)
+
 
 class ConvolutionalNoFlip(Convolutional):
     def __init__(self, *args, **kwargs):
@@ -145,8 +151,9 @@ class ConvolutionalNoFlipWithRes(ConvolutionalNoFlip):
 
 def create_network(inputs=None, batch=batch_size):
     if inputs is None:
-        inputs = T.ltensor4('features')
-    x = T.cast(inputs,'float32') / 255. if dataset != 'binarized_mnist' else inputs
+        inputs = T.tensor4('features')
+    x = T.cast(inputs,'float32')
+    x = x / 255. if dataset != 'binarized_mnist' else x
 
     # PixelCNN architecture
     conv_list = [ConvolutionalNoFlip(*first_layer, mask='A', name='0'), Rectifier()]
@@ -173,13 +180,16 @@ def create_network(inputs=None, batch=batch_size):
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
         x = x.reshape((-1,256))
         x_hat = Softmax().apply(x)
-        cost = CategoricalCrossEntropy().apply(inputs.flatten(), x_hat)  * img_dim * img_dim
-        cost_bits_dim = categorical_crossentropy(log_softmax(x), inputs.flatten())
+        inp = T.cast(inputs, 'int64').flatten()
+        cost = CategoricalCrossEntropy().apply(inp, x_hat) * img_dim * img_dim
+        cost_bits_dim = categorical_crossentropy(log_softmax(x), inp)
     else:
         x_hat = Logistic().apply(x)
         cost = BinaryCrossEntropy().apply(inputs, x_hat) * img_dim * img_dim
+        #cost = T.nnet.binary_crossentropy(x_hat, inputs)
+        #cost = cost.sum() / inputs.shape[0]
         cost_bits_dim = -(inputs * T.log2(x_hat) + (1.0 - inputs) * T.log2(1.0 - x_hat)).mean()
-    
+
     cost_bits_dim.name = "nnl_bits_dim"
     cost.name = 'loglikelihood_nat'
     return cost, cost_bits_dim
@@ -208,7 +218,7 @@ class SamplerBinomial(Random):
 
     @application
     def apply(self, featuremap, batch=batch_size):
-        return T.lt(self.theano_rng.uniform(size=(batch, 1, img_dim, img_dim)), featuremap)
+        return self.theano_rng.uniform(size=featuremap.shape,dtype=theano.config.floatX) < featuremap
 
 def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
     # Sample image from the learnt model
@@ -243,7 +253,7 @@ def prepare_opti(cost, test, *args):
     algorithm = GradientDescent(
         cost=cost,
         parameters=model.parameters,
-        step_rule=Adam(),
+        step_rule=Adam(learning_rate=0.0015),
         on_unused_sources='ignore'
     )
 
@@ -265,13 +275,13 @@ def prepare_opti(cost, test, *args):
         Printing(),
         ProgressBar(),
         ApplyMask(before_first_epoch=True, after_batch=True),
-        Checkpoint(path, every_n_epochs=save_every),
-        SaveModel(name='pixelcnn_{}'.format(dataset), every_n_epochs=save_every)
+        Checkpoint(check, every_n_epochs=save_every),
+        SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every)
     ]
 
     if resume:
         logger.info("Restoring from previous checkpoint")
-        extensions.append(Load(path))
+        extensions.append(Load(path+'/'+check))
 
     return model, algorithm, extensions
 
@@ -318,14 +328,14 @@ if __name__ == '__main__':
             extensions=extensions
         )
         main_loop.run()
-        with open('pixelcnn.pkl', 'w') as f:
+        with open(path+'/'+'pixelcnn.pkl', 'w') as f:
             dump(main_loop.model, f)
         model = main_loop.model
     else:
-        model = load(open('pixelcnn_epoch_5.pkl', 'r'))
+        model = load(open(path+'/'+'pixelcnn_epoch_5.pkl', 'r'))
 
     # Generate some samples
     samples = sampling(model)
     samples = samples.transpose((0,2,3,1)).reshape((batch_size*img_dim,img_dim,n_channel))
 
-    imsave('{}_samples.jpg'.format(dataset), samples)
+    imsave(path+'/'+'{}_samples.jpg'.format(dataset), samples)
