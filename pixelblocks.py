@@ -7,33 +7,31 @@ import sys
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp, AdaGrad
 from blocks.bricks.conv import ConvolutionalSequence, Convolutional
-from blocks.bricks import application, Logistic, Rectifier, Softmax, Random
+from blocks.bricks import application, Logistic, Rectifier, Softmax
 from blocks.bricks.cost import BinaryCrossEntropy, CategoricalCrossEntropy
 from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
 from blocks.extensions.monitoring import DataStreamMonitoring, TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint, Load
-from blocks.graph import ComputationGraph
 from blocks.initialization import IsotropicGaussian, Constant
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.serialization import dump, load
-from blocks.filter import VariableFilter
-from blocks.roles import OUTPUT
+
 from fuel.datasets import BinarizedMNIST, MNIST, CIFAR10
 from fuel.streams import DataStream
 from fuel.schemes import ShuffledScheme
 import numpy as np
 import theano
 from theano import tensor as T
-from scipy.misc import imsave
 
-from utils import SaveModel, ApplyMask
+
+from utils import SaveModel, ApplyMask, GenerateSamples
 
 sys.setrecursionlimit(500000)
 
 batch_size = 16
-dataset = "binarized_mnist"
+dataset = "cifar10"
 if dataset in ("mnist", "binarized_mnist"):
     img_dim = 28
     n_channel = 1
@@ -59,7 +57,7 @@ check = path+'/'+'checkpoint_{}.pkl'.format(dataset)
 sources = ('features',)
 train = True
 resume = False
-save_every = 5  # Save model every m-th epoch
+save_every = 10  # Save model every m-th epoch
 seed = 2
 
 n_layer = 8
@@ -85,14 +83,12 @@ class ConvolutionalNoFlip(Convolutional):
             # Channels are split to have access to different information from the past
             mask[:,:,center+1:,:] = 0.
             mask[:,:,center,center+1:] = 0.
-            feat_per_out_channel = self.num_filters // n_channel
-            feat_per_in_channel = self.num_channels // n_channel
             for i in xrange(n_channel):
                 for j in xrange(n_channel):
-                    if (self.mask_type == 'A' and j >= i) or (self.mask_type == 'B' and j > i):
+                    if (self.mask_type == 'A' and i >= j) or (self.mask_type == 'B' and i > j):
                         mask[
-                            i*feat_per_out_channel:(i + 1)*feat_per_out_channel,
-                            j*feat_per_in_channel:(j + 1)*feat_per_in_channel,
+                            j::n_channel,
+                            i::n_channel,
                             center,
                             center
                         ] = 0.
@@ -205,47 +201,6 @@ def categorical_crossentropy(pred, inputs):
     loss_bits_dim = - T.mean(pred[T.arange(inputs.shape[0]), inputs])
     return loss_bits_dim
 
-# Sampler used to sample from the discret distribution of the softmax
-class SamplerMultinomial(Random):
-
-    @application
-    def apply(self, featuremap, batch=batch_size):
-        f = self.theano_rng.multinomial(pvals=featuremap, dtype=theano.config.floatX)
-        f = T.argmax(f, axis=1)
-        return f.reshape((batch, n_channel, img_dim, img_dim))
-
-class SamplerBinomial(Random):
-
-    @application
-    def apply(self, featuremap, batch=batch_size):
-        return self.theano_rng.uniform(size=featuremap.shape,dtype=theano.config.floatX) < featuremap
-
-def sampling(model, input_=None, location=(0,0,0), batch=batch_size):
-    # Sample image from the learnt model
-    # model: trained model
-    # input: input image to start the reconstruction
-    # location: (x, y, channel) tuple for the location of the first pixel to predict
-    # x for row, y for columns
-
-    net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
-    logger.info('Output used: {}'.format(net_output))
-    Sampler = SamplerMultinomial if MODE == '256ary' else SamplerBinomial
-    pred = Sampler(theano_seed=seed).apply(net_output, batch=batch)
-    forward = ComputationGraph(pred).get_theano_function()
-
-    # Need to replace by a scan??
-    output = np.zeros((batch, n_channel, img_dim, img_dim), dtype=np.float32)
-    x, y, c = location
-    if input_ is not None:
-        output[:,:c+1,:x,:y] = input_[:,:c+1,:x,:y]
-    for row in range(x, img_dim):
-        col_ind = y * (row == x)  # Start at column y for the first row to predict
-        for col in range(col_ind, img_dim):
-            for chan in range(n_channel):
-                prediction = forward(output)[0]
-                output[:,chan,row,col] = prediction[:,chan,row,col]
-    return output
-
 def prepare_opti(cost, test, *args):
     model = Model(cost)
     logger.info("Model created")
@@ -276,12 +231,13 @@ def prepare_opti(cost, test, *args):
         ProgressBar(),
         ApplyMask(before_first_epoch=True, after_batch=True),
         Checkpoint(check, every_n_epochs=save_every),
-        SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every)
+        SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every),
+        GenerateSamples(every_n_epochs=save_every)
     ]
 
     if resume:
         logger.info("Restoring from previous checkpoint")
-        extensions.append(Load(path+'/'+check))
+        extensions = [Load(path+'/'+check)]
 
     return model, algorithm, extensions
 
@@ -332,10 +288,4 @@ if __name__ == '__main__':
             dump(main_loop.model, f)
         model = main_loop.model
     else:
-        model = load(open(path+'/'+'pixelcnn_epoch_5.pkl', 'r'))
-
-    # Generate some samples
-    samples = sampling(model)
-    samples = samples.transpose((0,2,3,1)).reshape((batch_size*img_dim,img_dim,n_channel))
-
-    imsave(path+'/'+'{}_samples.jpg'.format(dataset), samples)
+        model = load(open('pixelcnn_cifar10_2016-07-19/pixelcnn_cifar10_epoch_165.pkl', 'r'))
