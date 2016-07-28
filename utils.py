@@ -2,6 +2,7 @@ import numpy as np
 from scipy.misc import imsave
 import theano
 from theano import tensor as T
+import random
 
 from blocks.bricks.conv import ConvolutionalSequence, Convolutional
 from blocks.bricks import Random, application
@@ -53,19 +54,24 @@ class SamplerBinomial(Random):
 
     @application
     def apply(self, featuremap):
+        # featuremap = featuremap.reshape((-1, 784))
+        # import ipdb; ipdb.set_trace()
         return self.theano_rng.uniform(size=featuremap.shape,dtype=theano.config.floatX) < featuremap
+        # return sampled_output.reshape((-1,1,28,28))
 
 class GenerateSamples(SimpleExtension):
     def __init__(self, *args, **kwargs):
         super(GenerateSamples, self).__init__(*args, **kwargs)
 
     def do(self, which_callback, *args):
-        from pixelblocks import seed, n_channel, batch_size, img_dim, MODE, path, dataset
+        from gatedpixelblocks import n_channel, batch_size, img_dim, MODE, path, dataset
 
         model = self.main_loop.model
         net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
+        print '{} output used'.format(net_output)
+        # import ipdb; ipdb.set_trace()
         Sampler = SamplerMultinomial if MODE == '256ary' else SamplerBinomial
-        pred = Sampler(theano_seed=seed).apply(net_output)
+        pred = Sampler(theano_seed=random.randint(0,1000)).apply(net_output)
         forward = ComputationGraph(pred).get_theano_function()
 
         # Need to replace by a scan??
@@ -81,7 +87,10 @@ class GenerateSamples(SimpleExtension):
                     output[:,chan,row,col] = prediction[:,chan,row,col]
 
         output = output.reshape((4, 4, n_channel, img_dim, img_dim)).transpose((1,3,0,4,2))
-        output = output.reshape((4*img_dim,4*img_dim,n_channel))
+        if n_channel == 1:
+            output = output.reshape((4*img_dim,4*img_dim))
+        else:
+            output = output.reshape((4*img_dim,4*img_dim,n_channel))
         imsave(
             path+'/'+'{}_samples_epoch{}.jpg'.format(dataset, str(self.main_loop.log.status['epochs_done'])),
             output

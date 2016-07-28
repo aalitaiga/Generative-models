@@ -7,7 +7,7 @@ import sys
 
 from blocks.algorithms import GradientDescent, Adam, RMSProp, AdaGrad
 from blocks.bricks.conv import ConvolutionalSequence, Convolutional
-from blocks.bricks import application, Logistic, Rectifier, Softmax
+from blocks.bricks import application, Logistic, Rectifier, Softmax, Initializable
 from blocks.bricks.cost import BinaryCrossEntropy, CategoricalCrossEntropy
 from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
@@ -26,7 +26,7 @@ import theano
 from theano import tensor as T
 
 
-from utils import SaveModel, ApplyMask, GenerateSamples
+from utils import SaveModel, GenerateSamples
 
 sys.setrecursionlimit(500000)
 
@@ -58,10 +58,10 @@ sources = ('features',)
 train = True
 resume = False
 save_every = 10  # Save model every m-th epoch
+gen_every = 1
 seed = 2
 
 n_layer = 12
-res_connections = False
 h = 32
 first_layer = ((7, 7), h*n_channel)
 second_layer = ((3, 3), h*n_channel)
@@ -76,21 +76,17 @@ class ConvolutionalNoFlip(Convolutional):
     def push_allocation_config(self):
         super(ConvolutionalNoFlip, self).push_allocation_config()
         if self.mask_type:
+            assert self.filter_size[0] == 1
             filter_shape = (self.num_filters, self.num_channels) + self.filter_size
             mask = np.ones(filter_shape, dtype=theano.config.floatX)
-            center = filter_shape[2] // 2
-
-            # Channels are split to have access to different information from the past
-            mask[:,:,center+1:,:] = 0.
-            mask[:,:,center,center+1:] = 0.
             for i in xrange(n_channel):
                 for j in xrange(n_channel):
                     if (self.mask_type == 'A' and i >= j) or (self.mask_type == 'B' and i > j):
                         mask[
                             j::n_channel,
                             i::n_channel,
-                            center,
-                            center
+                            0,
+                            -1
                         ] = 0.
             self.mask = mask
 
@@ -122,7 +118,8 @@ class ConvolutionalNoFlip(Convolutional):
             input_shape = (self.batch_size, self.num_channels)
             input_shape += self.image_size
 
-        #self.W.set_value(self.W.get_value() * self.mask)
+        if self.mask_type:
+            self.W.set_value(self.W.get_value() * self.mask)
         output = self.conv2d_impl(
             input_, self.W,
             input_shape=input_shape,
@@ -138,12 +135,93 @@ class ConvolutionalNoFlip(Convolutional):
                 output += self.b.dimshuffle('x', 0, 1, 2)
         return output
 
-class ConvolutionalNoFlipWithRes(ConvolutionalNoFlip):
+class GatedPixelCNN(Initializable):
+    def __init__(self, name, filter_size, num_channels, num_filters=None, batch_size=None,
+                 res=True, image_size=(None, None), **kwargs):
+        # TODO: Activation in 1x1??
+        super(GatedPixelCNN, self).__init__(**kwargs)
+        if num_filters is None:
+            num_filters = num_channels
+        self.name = name
+        self.res = res
+        self.filter_size = filter_size
+        self.num_channels = num_channels
+        self.num_filters = num_filters
+        self.vertical_conv_nxn = ConvolutionalNoFlip(
+            filter_size=((filter_size//2)+1,filter_size),
+            num_filters=2*num_filters,
+            num_channels=num_channels,
+            border_mode=(filter_size // 2 + 1, filter_size // 2),
+            batch_size=batch_size,
+            biases_init=Constant(0.02),
+            tied_biases=False,
+            image_size=image_size,
+            name=name+"v_nxn"
+        )
+        self.vertical_conv_1x1 = ConvolutionalNoFlip(
+            filter_size=(1,1),
+            num_filters=2*num_filters,
+            num_channels=2*num_filters,
+            batch_size=batch_size,
+            biases_init=Constant(0.02),
+            tied_biases=False,
+            image_size=image_size,
+            name=name+"v_1x1"
+        )
+        self.horizontal_conv_1xn = ConvolutionalNoFlip(
+            filter_size=(1,(filter_size//2)+1),
+            num_filters=2*num_filters,
+            num_channels=num_channels,
+            border_mode=(0,filter_size//2),
+            batch_size=batch_size,
+            mask='B' if self.res else 'A',
+            tied_biases=False,
+            image_size=image_size,
+            name=name+"h_1xn"
+        )
+        self.children = [self.vertical_conv_nxn, self.vertical_conv_1x1,
+            self.horizontal_conv_1xn]
+        if self.res:
+            self.horizontal_conv_1x1 = ConvolutionalNoFlip(
+                filter_size=(1,1),
+                num_filters=num_channels,
+                num_channels=num_channels,
+                batch_size=batch_size,
+                name=name+"h_1x1",
+                mask='B',
+                image_size=image_size,
+                tied_biases=False
+            )
+            self.children.append(self.horizontal_conv_1x1)
 
-    @application(inputs=['input_'], outputs=['output'])
-    def apply(self, input_):
-        output = ConvolutionalNoFlip.apply(self, input_)
-        return input_ + output if res_connections else output
+
+    @application(inputs=['input_v', 'input_h'], outputs=['output_v', 'output_h'])
+    def apply(self, input_v, input_h):
+        # Vertical stack
+        v_nxn_out = self.vertical_conv_nxn.apply(input_v)
+        # Different cropping are used depending on the row we wish to condition on
+        v_nxn_out_to_h = v_nxn_out[:,:,:-(self.filter_size//2)-2,:]
+        v_nxn_out_to_v = v_nxn_out[:,:,1:-(self.filter_size//2)-1,:]
+        v_1x1_out = self.vertical_conv_1x1.apply(v_nxn_out_to_h)
+        output_v = T.tanh(v_nxn_out_to_v[:,:self.num_filters,:,:]) * \
+            T.nnet.sigmoid(v_nxn_out_to_v[:,self.num_filters:,:,:])
+
+        # Horizontal stack
+        h_1xn_out = self.horizontal_conv_1xn.apply(input_h)
+        h_1xn_out = h_1xn_out[:,:,:,:-(self.filter_size//2)]
+        h_sum = h_1xn_out + v_1x1_out
+        h_activation = T.tanh(h_sum[:,:self.num_filters,:,:]) * \
+            T.nnet.sigmoid(h_sum[:,self.num_filters:,:,:])
+        if self.res:
+            h_1x1_out = self.horizontal_conv_1x1.apply(h_activation)
+            # input_h_padded = T.zeros(input_h.shape, dtype=theano.config.floatX)
+            # input_h_padded = T.inc_subtensor(input_h_padded[:,:,3:,3:], input_h[:,:,:-3,:-3])
+            # input_h = input_h_padded
+            output_h = h_1x1_out #+ input_h
+        else:
+            output_h = h_activation
+        return output_v, output_h
+
 
 def create_network(inputs=None, batch=batch_size):
     if inputs is None:
@@ -151,18 +229,43 @@ def create_network(inputs=None, batch=batch_size):
     x = T.cast(inputs,'float32')
     x = x / 255. if dataset != 'binarized_mnist' else x
 
-    # PixelCNN architecture
-    conv_list = [ConvolutionalNoFlip(*first_layer, mask='A', name='0'), Rectifier()]
-    for i in range(n_layer):
-        conv_list.extend([ConvolutionalNoFlip(*second_layer, mask='B', name=str(i+1)), Rectifier()])
+    # GatedPixelCNN
+    gated = GatedPixelCNN(
+        name='gated_layer_0',
+        filter_size=7,
+        image_size=(img_dim,img_dim),
+        num_filters=h*n_channel,
+        num_channels=n_channel,
+        batch_size=batch,
+        weights_init=IsotropicGaussian(std=0.05, mean=0),
+        biases_init=Constant(0.02),
+        res=False
+    )
+    gated.initialize()
+    x_v, x_h = gated.apply(x, x)
 
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+1)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name=str(n_layer+2)), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip(*third_layer, mask='B', name=str(n_layer+3))])
+    for i in range(n_layer):
+        gated = GatedPixelCNN(
+            name='gated_layer_{}'.format(i+1),
+            filter_size=3,
+            image_size=(img_dim,img_dim),
+            num_channels=h*n_channel,
+            batch_size=batch,
+            weights_init=IsotropicGaussian(std=0.05, mean=0),
+            biases_init=Constant(0.02),
+            res=True
+        )
+        gated.initialize()
+        x_v, x_h = gated.apply(x_v, x_h)
+
+    conv_list = []
+    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name='1x1_conv_1'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name='1x1_conv_2'), Rectifier()])
+    conv_list.extend([ConvolutionalNoFlip(*third_layer, mask='B', name='output_layer')])
 
     sequence = ConvolutionalSequence(
         conv_list,
-        num_channels=n_channel,
+        num_channels=h*n_channel,
         batch_size=batch,
         image_size=(img_dim,img_dim),
         border_mode='half',
@@ -171,7 +274,7 @@ def create_network(inputs=None, batch=batch_size):
         tied_biases=False
     )
     sequence.initialize()
-    x = sequence.apply(x)
+    x = sequence.apply(x_h)
     if MODE == '256ary':
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
         x = x.reshape((-1,256))
@@ -229,11 +332,9 @@ def prepare_opti(cost, test, *args):
             prefix="test"),
         Printing(),
         ProgressBar(),
-        ApplyMask(before_first_epoch=True, after_batch=True),
-        Checkpoint(check, every_n_epochs=save_every),
-        Checkpoint(path+'/'+'exp.log', save_separately=['log'],every_n_epochs=save_every),
+        Checkpoint(path+'/'+'exp.log', save_separately=['log'], every_n_epochs=save_every),
         SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every),
-        GenerateSamples(every_n_epochs=save_every)
+        GenerateSamples(every_n_epochs=gen_every)
     ]
 
     if resume:
@@ -262,8 +363,7 @@ if __name__ == '__main__':
     elif dataset == "cifar10":
         data = CIFAR10(("train",))
         data_test = CIFAR10(("test",))
-    else:
-        pass  # Add CIFAR 10
+
     training_stream = DataStream(
         data,
         iteration_scheme=ShuffledScheme(data.num_examples, batch_size)
@@ -277,7 +377,7 @@ if __name__ == '__main__':
     if train:
         cost, cost_bits_dim = create_network()
         model, algorithm, extensions = prepare_opti(cost, test_stream, cost_bits_dim)
-
+        # import ipdb; ipdb.set_trace()
         main_loop = MainLoop(
             algorithm=algorithm,
             data_stream=training_stream,
