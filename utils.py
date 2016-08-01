@@ -68,8 +68,7 @@ class GenerateSamples(SimpleExtension):
 
         model = self.main_loop.model
         net_output = VariableFilter(roles=[OUTPUT])(model.variables)[-2]
-        print '{} output used'.format(net_output)
-        # import ipdb; ipdb.set_trace()
+        #print '{} output used'.format(net_output)
         Sampler = SamplerMultinomial if MODE == '256ary' else SamplerBinomial
         pred = Sampler(theano_seed=random.randint(0,1000)).apply(net_output)
         forward = ComputationGraph(pred).get_theano_function()

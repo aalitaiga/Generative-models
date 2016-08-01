@@ -13,7 +13,7 @@ from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
 from blocks.extensions.monitoring import DataStreamMonitoring, TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint, Load
-from blocks.initialization import IsotropicGaussian, Constant
+from blocks.initialization import Constant, Orthogonal
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.serialization import dump, load
@@ -70,7 +70,7 @@ third_layer = ((1, 1), 256*n_channel) if MODE == '256ary' else ((1, 1), n_channe
 
 class ConvolutionalNoFlip(Convolutional):
     def __init__(self, *args, **kwargs):
-        self.mask_type = kwargs.pop('mask', None)
+        self.mask_type = kwargs.pop('mask_type', None)
         Convolutional.__init__(self, *args, **kwargs)
 
     def push_allocation_config(self):
@@ -137,35 +137,31 @@ class ConvolutionalNoFlip(Convolutional):
 
 class GatedPixelCNN(Initializable):
     def __init__(self, name, filter_size, num_channels, num_filters=None, batch_size=None,
-                 res=True, image_size=(None, None), **kwargs):
+                 res=True, image_size=(None, None), tied_biases=None, **kwargs):
         # TODO: Activation in 1x1??
         super(GatedPixelCNN, self).__init__(**kwargs)
         if num_filters is None:
             num_filters = num_channels
         self.name = name
+        self.image_size = image_size
+        self.tied_biases = tied_biases
         self.res = res
         self.filter_size = filter_size
         self.num_channels = num_channels
         self.num_filters = num_filters
+        self.batch_size = batch_size
         self.vertical_conv_nxn = ConvolutionalNoFlip(
             filter_size=((filter_size//2)+1,filter_size),
             num_filters=2*num_filters,
             num_channels=num_channels,
             border_mode=(filter_size // 2 + 1, filter_size // 2),
-            batch_size=batch_size,
-            biases_init=Constant(0.02),
-            tied_biases=False,
-            image_size=image_size,
             name=name+"v_nxn"
         )
         self.vertical_conv_1x1 = ConvolutionalNoFlip(
             filter_size=(1,1),
             num_filters=2*num_filters,
             num_channels=2*num_filters,
-            batch_size=batch_size,
-            biases_init=Constant(0.02),
-            tied_biases=False,
-            image_size=image_size,
+            border_mode='valid',
             name=name+"v_1x1"
         )
         self.horizontal_conv_1xn = ConvolutionalNoFlip(
@@ -173,26 +169,28 @@ class GatedPixelCNN(Initializable):
             num_filters=2*num_filters,
             num_channels=num_channels,
             border_mode=(0,filter_size//2),
-            batch_size=batch_size,
-            mask='B' if self.res else 'A',
-            tied_biases=False,
-            image_size=image_size,
+            mask_type='B' if self.res else 'A',
             name=name+"h_1xn"
         )
         self.children = [self.vertical_conv_nxn, self.vertical_conv_1x1,
             self.horizontal_conv_1xn]
-        if self.res:
+        if self.res or True:
             self.horizontal_conv_1x1 = ConvolutionalNoFlip(
                 filter_size=(1,1),
-                num_filters=num_channels,
-                num_channels=num_channels,
-                batch_size=batch_size,
+                num_filters=num_filters,
+                num_channels=num_filters,
                 name=name+"h_1x1",
-                mask='B',
-                image_size=image_size,
-                tied_biases=False
+                batch_size=batch_size,
+                mask_type='B',
             )
             self.children.append(self.horizontal_conv_1x1)
+
+    def push_allocation_config(self):
+        for child in self.children:
+            child.image_size = self.image_size
+            child.batch_size = self.batch_size
+            child.tied_biases = self.tied_biases
+        super(GatedPixelCNN, self).push_allocation_config()
 
 
     @application(inputs=['input_v', 'input_h'], outputs=['output_v', 'output_h'])
@@ -219,7 +217,8 @@ class GatedPixelCNN(Initializable):
             # input_h = input_h_padded
             output_h = h_1x1_out #+ input_h
         else:
-            output_h = h_activation
+            h_1x1_out = self.horizontal_conv_1x1.apply(h_activation)
+            output_h = h_1x1_out #h_activation
         return output_v, output_h
 
 
@@ -237,7 +236,7 @@ def create_network(inputs=None, batch=batch_size):
         num_filters=h*n_channel,
         num_channels=n_channel,
         batch_size=batch,
-        weights_init=IsotropicGaussian(std=0.05, mean=0),
+        weights_init=Orthogonal(scale=0.1),
         biases_init=Constant(0.02),
         res=False
     )
@@ -251,7 +250,7 @@ def create_network(inputs=None, batch=batch_size):
             image_size=(img_dim,img_dim),
             num_channels=h*n_channel,
             batch_size=batch,
-            weights_init=IsotropicGaussian(std=0.05, mean=0),
+            weights_init=Orthogonal(scale=0.1),
             biases_init=Constant(0.02),
             res=True
         )
@@ -259,9 +258,9 @@ def create_network(inputs=None, batch=batch_size):
         x_v, x_h = gated.apply(x_v, x_h)
 
     conv_list = []
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name='1x1_conv_1'), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name='1x1_conv_2'), Rectifier()])
-    conv_list.extend([ConvolutionalNoFlip(*third_layer, mask='B', name='output_layer')])
+    conv_list.extend([Rectifier(), ConvolutionalNoFlip((1,1), h*n_channel, mask_type='B', name='1x1_conv_1')])
+    #conv_list.extend([Rectifier(), ConvolutionalNoFlip((1,1), h*n_channel, mask='B', name='1x1_conv_2')])
+    conv_list.extend([Rectifier(), ConvolutionalNoFlip(*third_layer, mask_type='B', name='output_layer')])
 
     sequence = ConvolutionalSequence(
         conv_list,
@@ -269,7 +268,7 @@ def create_network(inputs=None, batch=batch_size):
         batch_size=batch,
         image_size=(img_dim,img_dim),
         border_mode='half',
-        weights_init=IsotropicGaussian(std=0.05, mean=0),
+        weights_init=Orthogonal(scale=0.1),
         biases_init=Constant(0.02),
         tied_biases=False
     )
@@ -311,7 +310,7 @@ def prepare_opti(cost, test, *args):
     algorithm = GradientDescent(
         cost=cost,
         parameters=model.parameters,
-        step_rule=Adam(learning_rate=0.0015),
+        step_rule=Adam(learning_rate=0.015),
         on_unused_sources='ignore'
     )
 
@@ -332,9 +331,9 @@ def prepare_opti(cost, test, *args):
             prefix="test"),
         Printing(),
         ProgressBar(),
-        Checkpoint(path+'/'+'exp.log', save_separately=['log'], every_n_epochs=save_every),
         SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every),
-        GenerateSamples(every_n_epochs=gen_every)
+        GenerateSamples(every_n_epochs=gen_every),
+        #Checkpoint(path+'/'+'exp.log', save_separately=['log'], every_n_epochs=save_every),
     ]
 
     if resume:

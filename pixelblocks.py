@@ -231,9 +231,9 @@ def prepare_opti(cost, test, *args):
         ProgressBar(),
         ApplyMask(before_first_epoch=True, after_batch=True),
         Checkpoint(check, every_n_epochs=save_every),
-        Checkpoint(path+'/'+'exp.log', save_separately=['log'],every_n_epochs=save_every),
         SaveModel(name=path+'/'+'pixelcnn_{}'.format(dataset), every_n_epochs=save_every),
-        GenerateSamples(every_n_epochs=save_every)
+        GenerateSamples(every_n_epochs=save_every),
+        #Checkpoint(path+'/'+'exp.log', save_separately=['log'],every_n_epochs=save_every),
     ]
 
     if resume:
