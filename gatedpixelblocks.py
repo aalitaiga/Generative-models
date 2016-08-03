@@ -13,7 +13,7 @@ from blocks.extensions import FinishAfter, Printing, ProgressBar
 from blocks.extensions.stopping import FinishIfNoImprovementAfter
 from blocks.extensions.monitoring import DataStreamMonitoring, TrainingDataMonitoring
 from blocks.extensions.saveload import Checkpoint, Load
-from blocks.initialization import Constant, Orthogonal
+from blocks.initialization import Constant, IsotropicGaussian
 from blocks.main_loop import MainLoop
 from blocks.model import Model
 from blocks.serialization import dump, load
@@ -61,7 +61,7 @@ save_every = 10  # Save model every m-th epoch
 gen_every = 1
 seed = 2
 
-n_layer = 12
+n_layer = 5
 h = 32
 first_layer = ((7, 7), h*n_channel)
 second_layer = ((3, 3), h*n_channel)
@@ -210,14 +210,13 @@ class GatedPixelCNN(Initializable):
         h_sum = h_1xn_out + v_1x1_out
         h_activation = T.tanh(h_sum[:,:self.num_filters,:,:]) * \
             T.nnet.sigmoid(h_sum[:,self.num_filters:,:,:])
+        h_1x1_out = self.horizontal_conv_1x1.apply(h_activation)
         if self.res:
-            h_1x1_out = self.horizontal_conv_1x1.apply(h_activation)
             # input_h_padded = T.zeros(input_h.shape, dtype=theano.config.floatX)
             # input_h_padded = T.inc_subtensor(input_h_padded[:,:,3:,3:], input_h[:,:,:-3,:-3])
             # input_h = input_h_padded
             output_h = h_1x1_out #+ input_h
         else:
-            h_1x1_out = self.horizontal_conv_1x1.apply(h_activation)
             output_h = h_1x1_out #h_activation
         return output_v, output_h
 
@@ -236,7 +235,7 @@ def create_network(inputs=None, batch=batch_size):
         num_filters=h*n_channel,
         num_channels=n_channel,
         batch_size=batch,
-        weights_init=Orthogonal(scale=0.1),
+        weights_init=IsotropicGaussian(std=0.02, mean=0),
         biases_init=Constant(0.02),
         res=False
     )
@@ -250,7 +249,7 @@ def create_network(inputs=None, batch=batch_size):
             image_size=(img_dim,img_dim),
             num_channels=h*n_channel,
             batch_size=batch,
-            weights_init=Orthogonal(scale=0.1),
+            weights_init=IsotropicGaussian(std=0.02, mean=0),
             biases_init=Constant(0.02),
             res=True
         )
@@ -268,7 +267,7 @@ def create_network(inputs=None, batch=batch_size):
         batch_size=batch,
         image_size=(img_dim,img_dim),
         border_mode='half',
-        weights_init=Orthogonal(scale=0.1),
+        weights_init=IsotropicGaussian(std=0.02, mean=0),
         biases_init=Constant(0.02),
         tied_biases=False
     )
@@ -276,7 +275,7 @@ def create_network(inputs=None, batch=batch_size):
     x = sequence.apply(x_h)
     if MODE == '256ary':
         x = x.reshape((-1, 256, n_channel, img_dim, img_dim)).dimshuffle(0,2,3,4,1)
-        x = x.reshape((-1,256))
+        x = x.reshape((-1, 256))
         x_hat = Softmax().apply(x)
         inp = T.cast(inputs, 'int64').flatten()
         cost = CategoricalCrossEntropy().apply(inp, x_hat) * img_dim * img_dim
